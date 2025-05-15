@@ -1,5 +1,6 @@
 pip install pandas matplotlib tensorflow scikit-learn seaborn kaggle
 pip install opencv-python opencv-python-headless
+
 Go to https://www.kaggle.com/me/account
 
 Scroll down to "API" → Click "Create New API Token" → This will download kaggle.json.

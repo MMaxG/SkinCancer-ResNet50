@@ -1,5 +1,3 @@
-# train_skin_cancer.py (fixed: consistent rescaling, verified image copying, balanced dataset)
-
 import os
 import zipfile
 import pandas as pd
@@ -122,10 +120,10 @@ data_augmentation = tf.keras.Sequential([
 AUTOTUNE = tf.data.AUTOTUNE
 
 train_ds = tf.keras.utils.image_dataset_from_directory(
-    "dataset/train", image_size=(IMG_HEIGHT, IMG_WIDTH), batch_size=BATCH_SIZE, label_mode="categorical", subset="training", validation_split=0.2, seed=42
+    "dataset/train", image_size=(IMG_HEIGHT, IMG_WIDTH), batch_size=BATCH_SIZE, label_mode="categorical", seed=42
 )
 val_ds = tf.keras.utils.image_dataset_from_directory(
-    "dataset/val", image_size=(IMG_HEIGHT, IMG_WIDTH), batch_size=BATCH_SIZE, label_mode="categorical", subset="validation", validation_split=0.2, seed=42
+    "dataset/val", image_size=(IMG_HEIGHT, IMG_WIDTH), batch_size=BATCH_SIZE, label_mode="categorical", seed=42
 )
 test_ds = tf.keras.utils.image_dataset_from_directory(
     "dataset/test", image_size=(IMG_HEIGHT, IMG_WIDTH), batch_size=BATCH_SIZE, label_mode="categorical"
@@ -194,6 +192,47 @@ else:
 
     history_finetune = model.fit(train_ds, validation_data=val_ds, epochs=10)
 
+    def combine_histories(h1, h2):
+        combined = {}
+        for key in h1.history.keys():
+            combined[key] = h1.history[key] + h2.history.get(key, [])
+        return combined
+
+    combined_history = combine_histories(history_warmup, history_finetune)
+
+    def plot_training_curves(history_dict, model_name="ResNet50"):
+        acc = history_dict['accuracy']
+        val_acc = history_dict['val_accuracy']
+        loss = history_dict['loss']
+        val_loss = history_dict['val_loss']
+        epochs = range(1, len(acc) + 1)
+
+        plt.figure(figsize=(12, 5))
+
+        # Accuracy
+        plt.subplot(1, 2, 1)
+        plt.plot(epochs, acc, label='Training Accuracy')
+        plt.plot(epochs, val_acc, label='Validation Accuracy')
+        plt.title(f'{model_name} - Accuracy')
+        plt.xlabel('Epoch')
+        plt.ylabel('Accuracy')
+        plt.legend()
+
+        # Loss
+        plt.subplot(1, 2, 2)
+        plt.plot(epochs, loss, label='Training Loss')
+        plt.plot(epochs, val_loss, label='Validation Loss')
+        plt.title(f'{model_name} - Loss')
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.legend()
+
+        plt.tight_layout()
+        plt.savefig(f"{model_name.lower()}_training_curves.png", dpi=300)
+        plt.show()
+
+    plot_training_curves(combined_history, model_name="ResNet50")
+
 model.summary()
 
 # === 8. TRAIN MODEL WITH AUC-BASED SAVING ===
@@ -244,7 +283,6 @@ plt.show()
 
 # === 11. GRAD-CAM VISUALIZATION ===
 import cv2
-import random
 import matplotlib.pyplot as plt
 
 # Extract the ResNet base model from your full model
@@ -291,7 +329,7 @@ def make_gradcam_heatmap(img_array, base_model, classifier_model, last_conv_laye
 class_names = ["melanoma", "nevus"]
 
 # Pick random samples from test set
-sample_images = list(test_df.sample(5).itertuples())
+sample_images = list(test_df.sample(10).itertuples())
 
 for sample in sample_images:
     image_path = sample.image_path
@@ -325,4 +363,3 @@ for sample in sample_images:
     plt.axis('off')
     plt.tight_layout()
     plt.show()
-
