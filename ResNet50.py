@@ -105,8 +105,8 @@ create_dataset_dir("val", val_df)
 create_dataset_dir("test", test_df)
 
 # === 6. LOAD DATASETS ===
-IMG_HEIGHT = 224 #450
-IMG_WIDTH = 224 #600
+IMG_HEIGHT = 380 #450
+IMG_WIDTH = 380 #600
 BATCH_SIZE = 32 # Keep batch size for now, but likely needs reduction
 
 print("Preparing image datasets with augmentation...")
@@ -134,7 +134,7 @@ val_ds = val_ds.cache().prefetch(buffer_size=AUTOTUNE)
 test_ds = test_ds.cache().prefetch(buffer_size=AUTOTUNE) # Cache & prefetch val/test
 
 # === 7. BUILD MODEL ===
-MODEL_PATH = "resnet50_skin_cancer.keras"
+MODEL_PATH = "efficientnetb4_skin_cancer.keras"
 skip_training = False;
 if os.path.exists(MODEL_PATH):
     print("Loading existing model and skipping training...")
@@ -142,23 +142,23 @@ if os.path.exists(MODEL_PATH):
     model = tf.keras.models.load_model(MODEL_PATH)
 
 else:
-    print("No model found. Building ResNet50 model...")
-
     # Load the base ResNet50 model without the top layer
-    base_model = tf.keras.applications.ResNet50(weights='imagenet', include_top=False, input_shape=(IMG_HEIGHT, IMG_WIDTH, 3))
+    base_model = tf.keras.applications.EfficientNetB4(weights='imagenet', include_top=False, input_shape=(IMG_HEIGHT, IMG_WIDTH, 3))
     base_model.trainable = False  # Freeze base model initially
+
+    print(f"No model found. Building {base_model.name} model...")
 
     # Define the input and preprocessing pipeline
     inputs = tf.keras.Input(shape=(IMG_HEIGHT, IMG_WIDTH, 3))
     x = data_augmentation(inputs, training=True)
-    x = tf.keras.applications.resnet.preprocess_input(x)
+    x = tf.keras.applications.efficientnet.preprocess_input(x)
 
     # Pass through base model and add custom classifier
     x = base_model(x, training=False)
     x = tf.keras.layers.GlobalAveragePooling2D()(x)
     x = tf.keras.layers.Dropout(0.5)(x)
     x = tf.keras.layers.Dense(128, activation='relu')(x)
-    x = tf.keras.layers.Dropout(0.3)(x)
+    #x = tf.keras.layers.Dropout(0.3)(x)
     outputs = tf.keras.layers.Dense(2, activation='softmax')(x)
 
     # Create the full model
@@ -166,41 +166,39 @@ else:
 
     # === WARM-UP PHASE ===
     print("Starting warm-up training...")
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
+    model.compile(optimizer=tf.keras.optimizers.AdamW(learning_rate=1e-4, weight_decay=1e-4),
                 loss='categorical_crossentropy',
                 metrics=['accuracy'])
 
-    history_warmup = model.fit(train_ds, validation_data=val_ds, epochs=5)
+    history_warmup = model.fit(train_ds, validation_data=val_ds, epochs=2)
 
     # === FINE-TUNING PHASE ===
     print("Unfreezing all layers for fine-tuning...")
 
-    # Unfreeze some or all of the base model
-    # Option 1: Unfreeze all layers
-    #base_model.trainable = True
-
-    # Option 2: Only fine-tune deeper layers (unfreeze last 25 layers)
     for layer in base_model.layers[:-25]:
         layer.trainable = False
     for layer in base_model.layers[-25:]:
         layer.trainable = True
 
-    # Recompile with a lower learning rate for fine-tuning
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5),
+    model.compile(optimizer=tf.keras.optimizers.AdamW(learning_rate=1e-5, weight_decay=1e-4,),
                 loss='categorical_crossentropy',
                 metrics=['accuracy'])
 
-    history_finetune = model.fit(train_ds, validation_data=val_ds, epochs=10)
+    history_finetune = model.fit(train_ds, validation_data=val_ds, epochs=2)
 
     def combine_histories(h1, h2):
         combined = {}
-        for key in h1.history.keys():
-            combined[key] = h1.history[key] + h2.history.get(key, [])
+        # Handle if either input is already a dict
+        h1_dict = h1.history if hasattr(h1, 'history') else h1
+        h2_dict = h2.history if hasattr(h2, 'history') else h2
+
+        for key in h1_dict.keys():
+            combined[key] = h1_dict[key] + h2_dict.get(key, [])
         return combined
 
     combined_history = combine_histories(history_warmup, history_finetune)
 
-    def plot_training_curves(history_dict, model_name="ResNet50"):
+    def plot_training_curves(history_dict, model_name="EfficientNet-B4"):
         acc = history_dict['accuracy']
         val_acc = history_dict['val_accuracy']
         loss = history_dict['loss']
@@ -231,8 +229,6 @@ else:
         plt.savefig(f"{model_name.lower()}_training_curves.png", dpi=300)
         plt.show()
 
-    plot_training_curves(combined_history, model_name="ResNet50")
-
 model.summary()
 
 # === 8. TRAIN MODEL WITH AUC-BASED SAVING ===
@@ -248,21 +244,26 @@ if not skip_training:
         verbose=1
     )
 
-    early_stop = tf.keras.callbacks.EarlyStopping(patience=5, restore_best_weights=True)
+    early_stop = tf.keras.callbacks.EarlyStopping(patience=5, monitor='loss', restore_best_weights=True)
 
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5),
+    model.compile(optimizer=tf.keras.optimizers.AdamW(learning_rate=1e-5, weight_decay=1e-4,),
                   loss='categorical_crossentropy',
                   metrics=['accuracy', tf.keras.metrics.AUC(name='auc')])
 
-    model.fit(train_ds,
-              validation_data=val_ds,
+    history_final = model.fit(train_ds,
               epochs=10,
+              validation_data=val_ds,
               callbacks=[early_stop, checkpoint_cb])
 
+    combined_history = combine_histories(combined_history, history_final)
+
+    plot_training_curves(combined_history, model_name="EfficientNet-B4")
+
+else:
     # Reload the best model from disk (saved during training)
     model = tf.keras.models.load_model(MODEL_PATH)
-else:
     print("Model loaded from disk. Skipping training phase.")
+    
 
 # === 9. EVALUATE ===
 
@@ -285,16 +286,16 @@ plt.show()
 import cv2
 import matplotlib.pyplot as plt
 
-# Extract the ResNet base model from your full model
-resnet_model = model.get_layer("resnet50")
+# Extract the base model from your full model
+resnet_model = model.get_layer("efficientnetb4")
 
-# Define classifier head (everything after resnet_model)
+# Define classifier head (everything after base model)
 x = resnet_model.output
 for layer in model.layers[model.layers.index(resnet_model)+1:]:
     x = layer(x)
 classifier_model = tf.keras.Model(inputs=resnet_model.output, outputs=x)
 
-# Find the last Conv2D layer inside the ResNet base
+# Find the last Conv2D layer inside the model base
 def get_last_conv_layer(model):
     for layer in reversed(model.layers):
         if isinstance(layer, tf.keras.layers.Conv2D):
@@ -329,7 +330,7 @@ def make_gradcam_heatmap(img_array, base_model, classifier_model, last_conv_laye
 class_names = ["melanoma", "nevus"]
 
 # Pick random samples from test set
-sample_images = list(test_df.sample(10).itertuples())
+sample_images = list(test_df.sample(3).itertuples())
 
 for sample in sample_images:
     image_path = sample.image_path

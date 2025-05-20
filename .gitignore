@@ -3,3 +3,4 @@
 \resnet50_skin_cancer.keras
 \skin-cancer-mnist-ham10000.zip
 *.jpg
+*.keras
