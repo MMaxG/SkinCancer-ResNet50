@@ -144,12 +144,15 @@ val_ds = val_ds.cache().prefetch(buffer_size=AUTOTUNE)
 test_ds = test_ds.cache().prefetch(buffer_size=AUTOTUNE) # Cache & prefetch val/test
 
 # === 7. BUILD MODEL ===
-MODEL_PATH = "efficientnetb4_skin_cancer.keras"
+from keras.applications import ConvNeXtTiny
+from keras.applications.convnext import LayerScale  # This is the missing piece
+MODEL_PATH = "convnexttiny_skin_cancer.keras"
 skip_training = False;
 if os.path.exists(MODEL_PATH):
     print("Loading existing model and skipping training...")
     skip_training = True
-    model = tf.keras.models.load_model(MODEL_PATH)
+    #model = tf.keras.models.load_model(MODEL_PATH)
+    model = tf.keras.models.load_model(MODEL_PATH, custom_objects={"LayerScale": LayerScale})
 
 else:
     # Load the base ResNet50 model without the top layer
@@ -162,7 +165,7 @@ else:
     # Define the input and preprocessing pipeline
     inputs = tf.keras.Input(shape=(IMG_HEIGHT, IMG_WIDTH, 3))
     x = data_augmentation(inputs, training=True)
-    x = tf.keras.applications.efficientnet.preprocess_input(x)
+    #x = tf.keras.applications.resnet50.preprocess_input(x) # For ConvNeXt, preprocessing is included in the model using a Normalization layer
 
     # Pass through base model and add custom classifier
     x = base_model(x, training=False)
@@ -246,7 +249,7 @@ if not skip_training:
 
     checkpoint_cb = tf.keras.callbacks.ModelCheckpoint(
         filepath=MODEL_PATH,
-        monitor='val_auc',
+        monitor='val_accuracy',
         mode='max',
         save_best_only=True,
         save_weights_only=False,
@@ -290,7 +293,7 @@ import cv2
 import matplotlib.pyplot as plt
 
 # Extract the base model from your full model
-resnet_model = model.get_layer("efficientnetb4")
+resnet_model = model.get_layer("convnext_tiny")
 
 # Define classifier head (everything after base model)
 x = resnet_model.output
