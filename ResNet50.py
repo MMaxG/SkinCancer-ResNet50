@@ -50,15 +50,16 @@ df['image_path'] = image_dir + "/" + df['image_id'] + ".jpg"
 
 # Balance: sample 1000 of each class
 # 1113 melanoma images and 6705 nevus
-mel_df = df[df['label'] == 'melanoma'].sample(n=1000, random_state=42, replace=False) # replace=True for overfitting (if need more images than exist)
-nv_df = df[df['label'] == 'nevus'].sample(n=1000, random_state=42)
-df_balanced = pd.concat([mel_df, nv_df]).sample(frac=1, random_state=42)
+rng=77 # change for different random samples
+mel_df = df[df['label'] == 'melanoma'].sample(n=1000, random_state=rng, replace=False) # replace=True for overfitting (if need more images than exist)
+nv_df = df[df['label'] == 'nevus'].sample(n=1000, random_state=rng)
+df_balanced = pd.concat([mel_df, nv_df]).sample(frac=1, random_state=rng)
 print("\nBalanced dataset:")
 print(df_balanced['label'].value_counts())
 
 # === 4. SPLIT DATA ===
-train_df, test_df = train_test_split(df_balanced, stratify=df_balanced['label'], test_size=0.3, random_state=42)
-val_df, test_df = train_test_split(test_df, stratify=test_df['label'], test_size=0.5, random_state=42)
+train_df, test_df = train_test_split(df_balanced, stratify=df_balanced['label'], test_size=0.3, random_state=rng)
+val_df, test_df = train_test_split(test_df, stratify=test_df['label'], test_size=0.5, random_state=rng)
 print("\nTrain/Val/Test split:")
 print("Train:")
 print(train_df['label'].value_counts())
@@ -129,10 +130,10 @@ data_augmentation = tf.keras.Sequential([
 AUTOTUNE = tf.data.AUTOTUNE
 
 train_ds = tf.keras.utils.image_dataset_from_directory(
-    "dataset/train", image_size=(IMG_HEIGHT, IMG_WIDTH), batch_size=BATCH_SIZE, label_mode="categorical", seed=42
+    "dataset/train", image_size=(IMG_HEIGHT, IMG_WIDTH), batch_size=BATCH_SIZE, label_mode="categorical", seed=rng
 )
 val_ds = tf.keras.utils.image_dataset_from_directory(
-    "dataset/val", image_size=(IMG_HEIGHT, IMG_WIDTH), batch_size=BATCH_SIZE, label_mode="categorical", seed=42
+    "dataset/val", image_size=(IMG_HEIGHT, IMG_WIDTH), batch_size=BATCH_SIZE, label_mode="categorical", seed=rng
 )
 test_ds = tf.keras.utils.image_dataset_from_directory(
     "dataset/test", image_size=(IMG_HEIGHT, IMG_WIDTH), batch_size=BATCH_SIZE, label_mode="categorical"
@@ -166,24 +167,25 @@ else:
     x = data_augmentation(inputs, training=True)
     #x = tf.keras.applications.resnet50.preprocess_input(x) # For ConvNeXt, preprocessing is included in the model using a Normalization layer
 
+    from tensorflow.keras.optimizers.experimental import AdamW
     # Pass through base model and add custom classifier
     x = base_model(x, training=False)
     x = tf.keras.layers.GlobalAveragePooling2D()(x)
     x = tf.keras.layers.Dropout(0.5)(x)
-    x = tf.keras.layers.Dense(128, activation='relu')(x)
+    x = tf.keras.layers.Dense(128, activation='relu', kernel_regularizer=tf.keras.regularizers.l2(1e-4))(x)
     x = tf.keras.layers.Dropout(0.3)(x)
     outputs = tf.keras.layers.Dense(2, activation='softmax')(x)
 
     # Create the full model
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
-
+    model.summary()
     # === WARM-UP PHASE ===
     print("Starting warm-up training...")
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5),
-                loss='categorical_crossentropy',
-                metrics=['accuracy'])
+    model.compile(optimizer=AdamW(learning_rate=1e-4),
+                loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.1),
+                metrics=['accuracy', tf.keras.metrics.AUC(name='auc')])
 
-    history_warmup = model.fit(train_ds, validation_data=val_ds, epochs=2)
+    history_warmup = model.fit(train_ds, validation_data=val_ds, epochs=5)
 
     # === FINE-TUNING PHASE ===
     print("Unfreezing all layers for fine-tuning...")
@@ -193,11 +195,11 @@ else:
     for layer in base_model.layers[-25:]:
         layer.trainable = True
 
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5),
-                loss='categorical_crossentropy',
-                metrics=['accuracy'])
+    model.compile(optimizer=AdamW(learning_rate=1e-5),
+                loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.1),
+                metrics=['accuracy', tf.keras.metrics.AUC(name='auc')])
 
-    history_finetune = model.fit(train_ds, validation_data=val_ds, epochs=2)
+    history_finetune = model.fit(train_ds, validation_data=val_ds, epochs=5)
 
     def combine_histories(h1, h2):
         combined = {}
@@ -242,15 +244,13 @@ else:
         plt.savefig(f"{model_name.lower()}_training_curves.png", dpi=300)
         plt.show()
 
-model.summary()
-
 # === 8. TRAIN MODEL WITH AUC-BASED SAVING ===
 if not skip_training:
     print("Training model...")
 
     checkpoint_cb = tf.keras.callbacks.ModelCheckpoint(
         filepath=MODEL_PATH,
-        monitor='val_accuracy',
+        monitor='val_auc',
         mode='max',
         save_best_only=True,
         save_weights_only=False,
@@ -259,12 +259,12 @@ if not skip_training:
 
     early_stop = tf.keras.callbacks.EarlyStopping(patience=5, monitor='loss', restore_best_weights=True)
 
-    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5),
-                  loss='categorical_crossentropy',
+    model.compile(optimizer=AdamW(learning_rate=1e-5),
+                  loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.1),
                   metrics=['accuracy', tf.keras.metrics.AUC(name='auc')])
 
     history_final = model.fit(train_ds,
-              epochs=10,
+              epochs=20,
               validation_data=val_ds,
               callbacks=[early_stop, checkpoint_cb])
 
