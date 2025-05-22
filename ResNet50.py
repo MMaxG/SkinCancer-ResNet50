@@ -3,11 +3,20 @@ import zipfile
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress INFO and WARNING (but not ERROR)
 import tensorflow as tf
+
+tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, roc_auc_score, confusion_matrix
 import seaborn as sns
 import shutil
+
+print("Num GPUs Available: ", len(tf.config.list_physical_devices('GPU')))
+
+import tensorflow as tf
+print(tf.__version__)
 
 # === 1. DOWNLOAD HAM10000 DATASET FROM KAGGLE ===
 print("\nChecking for dataset...")
@@ -41,15 +50,16 @@ df['image_path'] = image_dir + "/" + df['image_id'] + ".jpg"
 
 # Balance: sample 1000 of each class
 # 1113 melanoma images and 6705 nevus
-mel_df = df[df['label'] == 'melanoma'].sample(n=1000, random_state=42, replace=False) # replace=True for overfitting (if need more images than exist)
-nv_df = df[df['label'] == 'nevus'].sample(n=1000, random_state=42)
-df_balanced = pd.concat([mel_df, nv_df]).sample(frac=1, random_state=42)
+rng=77 # change for different random samples
+mel_df = df[df['label'] == 'melanoma'].sample(n=1000, random_state=rng, replace=False) # replace=True for overfitting (if need more images than exist)
+nv_df = df[df['label'] == 'nevus'].sample(n=1000, random_state=rng)
+df_balanced = pd.concat([mel_df, nv_df]).sample(frac=1, random_state=rng)
 print("\nBalanced dataset:")
 print(df_balanced['label'].value_counts())
 
 # === 4. SPLIT DATA ===
-train_df, test_df = train_test_split(df_balanced, stratify=df_balanced['label'], test_size=0.3, random_state=42)
-val_df, test_df = train_test_split(test_df, stratify=test_df['label'], test_size=0.5, random_state=42)
+train_df, test_df = train_test_split(df_balanced, stratify=df_balanced['label'], test_size=0.3, random_state=rng)
+val_df, test_df = train_test_split(test_df, stratify=test_df['label'], test_size=0.5, random_state=rng)
 print("\nTrain/Val/Test split:")
 print("Train:")
 print(train_df['label'].value_counts())
@@ -105,8 +115,8 @@ create_dataset_dir("val", val_df)
 create_dataset_dir("test", test_df)
 
 # === 6. LOAD DATASETS ===
-IMG_HEIGHT = 380 #450
-IMG_WIDTH = 380 #600
+IMG_HEIGHT = 224 #450
+IMG_WIDTH = 224 #600
 BATCH_SIZE = 32 # Keep batch size for now, but likely needs reduction
 
 print("Preparing image datasets with augmentation...")
@@ -120,10 +130,10 @@ data_augmentation = tf.keras.Sequential([
 AUTOTUNE = tf.data.AUTOTUNE
 
 train_ds = tf.keras.utils.image_dataset_from_directory(
-    "dataset/train", image_size=(IMG_HEIGHT, IMG_WIDTH), batch_size=BATCH_SIZE, label_mode="categorical", seed=42
+    "dataset/train", image_size=(IMG_HEIGHT, IMG_WIDTH), batch_size=BATCH_SIZE, label_mode="categorical", seed=rng
 )
 val_ds = tf.keras.utils.image_dataset_from_directory(
-    "dataset/val", image_size=(IMG_HEIGHT, IMG_WIDTH), batch_size=BATCH_SIZE, label_mode="categorical", seed=42
+    "dataset/val", image_size=(IMG_HEIGHT, IMG_WIDTH), batch_size=BATCH_SIZE, label_mode="categorical", seed=rng
 )
 test_ds = tf.keras.utils.image_dataset_from_directory(
     "dataset/test", image_size=(IMG_HEIGHT, IMG_WIDTH), batch_size=BATCH_SIZE, label_mode="categorical"
@@ -143,6 +153,7 @@ if os.path.exists(MODEL_PATH):
 
 else:
     # Load the base ResNet50 model without the top layer
+    # https://keras.io/api/applications/
     base_model = tf.keras.applications.EfficientNetB4(weights='imagenet', include_top=False, input_shape=(IMG_HEIGHT, IMG_WIDTH, 3))
     base_model.trainable = False  # Freeze base model initially
 
@@ -158,19 +169,19 @@ else:
     x = tf.keras.layers.GlobalAveragePooling2D()(x)
     x = tf.keras.layers.Dropout(0.5)(x)
     x = tf.keras.layers.Dense(128, activation='relu')(x)
-    #x = tf.keras.layers.Dropout(0.3)(x)
+    x = tf.keras.layers.Dropout(0.3)(x)
     outputs = tf.keras.layers.Dense(2, activation='softmax')(x)
 
     # Create the full model
     model = tf.keras.Model(inputs=inputs, outputs=outputs)
-
+    model.summary()
     # === WARM-UP PHASE ===
     print("Starting warm-up training...")
-    model.compile(optimizer=tf.keras.optimizers.AdamW(learning_rate=1e-4, weight_decay=1e-4),
-                loss='categorical_crossentropy',
-                metrics=['accuracy'])
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
+                loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.1),
+                metrics=['accuracy', tf.keras.metrics.AUC(name='auc')])
 
-    history_warmup = model.fit(train_ds, validation_data=val_ds, epochs=2)
+    history_warmup = model.fit(train_ds, validation_data=val_ds, epochs=5)
 
     # === FINE-TUNING PHASE ===
     print("Unfreezing all layers for fine-tuning...")
@@ -180,11 +191,11 @@ else:
     for layer in base_model.layers[-25:]:
         layer.trainable = True
 
-    model.compile(optimizer=tf.keras.optimizers.AdamW(learning_rate=1e-5, weight_decay=1e-4,),
-                loss='categorical_crossentropy',
-                metrics=['accuracy'])
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5),
+                loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.1),
+                metrics=['accuracy', tf.keras.metrics.AUC(name='auc')])
 
-    history_finetune = model.fit(train_ds, validation_data=val_ds, epochs=2)
+    history_finetune = model.fit(train_ds, validation_data=val_ds, epochs=5)
 
     def combine_histories(h1, h2):
         combined = {}
@@ -198,7 +209,7 @@ else:
 
     combined_history = combine_histories(history_warmup, history_finetune)
 
-    def plot_training_curves(history_dict, model_name="EfficientNet-B4"):
+    def plot_training_curves(history_dict, model_name="efficientnetb4"):
         acc = history_dict['accuracy']
         val_acc = history_dict['val_accuracy']
         loss = history_dict['loss']
@@ -229,8 +240,6 @@ else:
         plt.savefig(f"{model_name.lower()}_training_curves.png", dpi=300)
         plt.show()
 
-model.summary()
-
 # === 8. TRAIN MODEL WITH AUC-BASED SAVING ===
 if not skip_training:
     print("Training model...")
@@ -246,25 +255,19 @@ if not skip_training:
 
     early_stop = tf.keras.callbacks.EarlyStopping(patience=5, monitor='loss', restore_best_weights=True)
 
-    model.compile(optimizer=tf.keras.optimizers.AdamW(learning_rate=1e-5, weight_decay=1e-4,),
-                  loss='categorical_crossentropy',
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=1e-5),
+                  loss=tf.keras.losses.CategoricalCrossentropy(label_smoothing=0.1),
                   metrics=['accuracy', tf.keras.metrics.AUC(name='auc')])
 
     history_final = model.fit(train_ds,
-              epochs=10,
+              epochs=20,
               validation_data=val_ds,
               callbacks=[early_stop, checkpoint_cb])
 
     combined_history = combine_histories(combined_history, history_final)
 
-    plot_training_curves(combined_history, model_name="EfficientNet-B4")
-
-else:
-    # Reload the best model from disk (saved during training)
-    model = tf.keras.models.load_model(MODEL_PATH)
-    print("Model loaded from disk. Skipping training phase.")
+    plot_training_curves(combined_history, model_name="efficientnetb4")
     
-
 # === 9. EVALUATE ===
 
 print("Evaluating model on test set...")
@@ -340,7 +343,8 @@ for sample in sample_images:
     img = tf.keras.utils.load_img(image_path, target_size=(IMG_HEIGHT, IMG_WIDTH))
     img_array = tf.keras.utils.img_to_array(img)
     img_array = tf.expand_dims(img_array, axis=0)
-    img_array = tf.keras.applications.resnet.preprocess_input(img_array)
+    img_array = tf.keras.applications.resnet50.preprocess_input(img_array)
+
 
     # Make prediction
     preds = model.predict(img_array)

@@ -4,3 +4,4 @@
 \skin-cancer-mnist-ham10000.zip
 *.jpg
 *.keras
+*.h5
